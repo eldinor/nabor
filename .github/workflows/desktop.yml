@@ -1,0 +1,101 @@
+name: Desktop checks and installers
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      sign:
+        description: Sign and notarize installers using configured secrets
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            name: windows-x64
+          - os: macos-15
+            name: macos-arm64
+          - os: macos-15-intel
+            name: macos-intel
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.20.0'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - run: npm run build
+      - run: cargo test --locked --manifest-path src-tauri/core/Cargo.toml -- --nocapture
+      - run: cargo test --locked --manifest-path src-tauri/agent/Cargo.toml
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - run: npx playwright install chromium
+      - run: npm test
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows' && inputs.sign
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { throw 'WINDOWS_CERTIFICATE is required for a signed build' }
+          $certPath = Join-Path $env:RUNNER_TEMP 'nabor-signing.pfx'
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          $config = @{ bundle = @{ windows = @{ certificateThumbprint = $cert.Thumbprint; digestAlgorithm = 'sha256'; timestampUrl = 'http://timestamp.digicert.com'; tsp = $true } } } | ConvertTo-Json -Compress -Depth 5
+          "TAURI_CONFIG=$config" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Remove-Item -LiteralPath $certPath
+      - name: Build unsigned installers
+        if: ${{ !inputs.sign }}
+        run: npm run tauri -- build
+      - name: Build signed Windows installers
+        if: runner.os == 'Windows' && inputs.sign
+        run: npm run tauri -- build
+      - name: Build signed and notarized Mac installers
+        if: runner.os == 'macOS' && inputs.sign
+        uses: tauri-apps/tauri-action@v0
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      - name: Verify signed Windows artifacts
+        if: runner.os == 'Windows' && inputs.sign
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem -Path src-tauri/target/release/bundle/nsis/*.exe,src-tauri/target/release/bundle/msi/*.msi
+          foreach ($file in $files) {
+            if ((Get-AuthenticodeSignature -LiteralPath $file.FullName).Status -ne 'Valid') { throw 'Installer signature validation failed' }
+          }
+      - name: Verify signed and notarized Mac app
+        if: runner.os == 'macOS' && inputs.sign
+        run: |
+          codesign --verify --deep --strict src-tauri/target/release/bundle/macos/Nabor.app
+          spctl --assess --type execute src-tauri/target/release/bundle/macos/Nabor.app
+          xcrun stapler validate src-tauri/target/release/bundle/macos/Nabor.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nabor-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/dmg/*.dmg
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results-${{ matrix.name }}
+          path: test-results/

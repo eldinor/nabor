@@ -1,0 +1,10 @@
+node_modules/
+dist/
+target/
+.tools/
+test-results/
+playwright-report/
+*.local
+rustup-init.exe
+*.tsbuildinfo
+src-tauri/gen/

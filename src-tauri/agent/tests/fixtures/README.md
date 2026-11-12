@@ -1,0 +1,1 @@
+These RSA keys were generated locally solely for automated identity-validation tests. They are public test fixtures and are never used for live authentication, token storage, or signing Nabor releases.

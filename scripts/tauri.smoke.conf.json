@@ -1,0 +1,17 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Nabor",
+        "width": 1360,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 640,
+        "visible": false,
+        "additionalBrowserArgs": "--remote-debugging-port=9223 --disable-features=msWebOOUI,msPdfOOUI",
+        "dragDropEnabled": false
+      }
+    ]
+  }
+}

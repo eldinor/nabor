@@ -1,0 +1,32 @@
+[package]
+name = "nabor"
+version = "0.4.0"
+edition = "2021"
+
+[lib]
+name = "nabor_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-clipboard-manager = "2"
+nabor-core = { path = "core" }
+nabor-agent = { path = "agent" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+open = "5"
+fs2 = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+base64 = "0.22"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[workspace]
+members = ["core", "agent"]
+
+[dev-dependencies]
+tempfile = "3"

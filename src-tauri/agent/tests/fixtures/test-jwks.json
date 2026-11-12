@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "n": "t2A2MxEcS8BswfzXA_z3eOA6bd_9VLv6asxcAOubd-Th5yrvOCR2gMDqAr_9uyyOl59sxYagOp__ogI3h33MGS4yzXhjRxEKQ-c0jwL9tWglLn3gXmKsTy0_Lz0Sa8iyHChbq1j0NmVX_pYOurbPLBK0hZE5ng0mQ6dEdeai0WgBqIXhmOujVxJCOU0Ronf2bpsIhcIB2W37kbeCBehXPgPTb8rai-9PI3eODEwLtXrh_2zGn96iFGaY6lIPTRHLygzl9FmjP-hMupUvSHfJIPgyesmiFgfjuT5eMxL6J44n77UQKMgqRjPbWGxHACM5yI5o9s2W2QaD8esaJxZMeQ",
+      "e": "AQAB",
+      "kid": "nabor-test-only",
+      "alg": "RS256",
+      "use": "sig"
+    }
+  ]
+}
