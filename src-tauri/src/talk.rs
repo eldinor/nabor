@@ -41,7 +41,7 @@ pub enum TalkRequest {
 fn view(c: &Collection, item_id: &str) -> Result<Value, String> {
     let item = c.load(item_id)?;
     Ok(
-        json!({"conversation":c.conversation(item_id)?,"itemId":item.id,"title":item.title,"sourceHash":item.source_hash,"assetCount":item.assets.len()}),
+        json!({"conversation":c.conversation(item_id)?,"itemId":item.id,"title":item.title,"sourceHash":item.source_hash,"assetCount":item.assets.len(),"documentCount":item.documents.len(),"linkCount":item.links.len()}),
     )
 }
 fn history(c: &Conversation) -> Vec<(String, String)> {
@@ -123,7 +123,7 @@ fn perform(app: tauri::AppHandle, payload: TalkRequest) -> Result<Value, String>
         .status()
         .model
         .ok_or("Choose a model in Agent settings")?;
-    let (root, conversation, context, images) = {
+    let (root, conversation, context, images, snapshot) = {
         let state = app.state::<State>();
         let guard = state
             .collection
@@ -135,25 +135,15 @@ fn perform(app: tauri::AppHandle, payload: TalkRequest) -> Result<Value, String>
             return Err("Pause batch generation before asking the agent".into());
         }
         let item = c.load(&item_id)?;
-        if item.assets.len() > 20 {
-            return Err("Ask agent supports up to 20 images per item".into());
-        }
-        if !c.check(&[item_id.clone()])?.is_empty() {
-            return Err("Locate missing files before asking the agent".into());
-        }
-        let mut images = vec![];
-        for (n, a) in item.assets.iter().enumerate() {
-            images.push((
-                format!("Image {}: {:?}", n + 1, a.role),
-                nabor_core::agent_image(&c.resolve(&item, a)?)?,
-            ));
-        }
+        let only_attachments = agent.status().send_only_attachments;
+        let images = c.agent_images(&item, only_attachments, false)?;
         let sources: Vec<_> = item
             .assets
             .iter()
+            .filter(|a| !only_attachments || a.role != nabor_core::Role::Original)
             .filter_map(|a| a.source_url.as_ref())
             .collect();
-        let context=format!("Current item material:\nTitle: {}\nCaption: {}\nItem instructions and notes:\n{}\nCollection caption instructions (background context):\n{}\nImage source URLs (not fetched):\n{}",item.title,item.caption,item.notes,c.settings.caption_instructions,serde_json::to_string(&sources).unwrap_or_default());
+        let context=format!("Current item material:\nTitle: {}\nCaption: {}\nItem instructions and notes:\n{}\nCollection caption instructions (background context):\n{}\nImage source URLs (not fetched):\n{}{}",item.title,item.caption,item.agent_reference_notes(),c.settings.caption_instructions,serde_json::to_string(&sources).unwrap_or_default(),agent::image_scope(only_attachments));
         if context.len() > 200_000 {
             return Err(
                 "This item's text exceeds the conversation input limit of 200,000 bytes".into(),
@@ -166,9 +156,16 @@ fn perform(app: tauri::AppHandle, payload: TalkRequest) -> Result<Value, String>
             retry.as_deref(),
             model,
         )?;
-        (c.root.clone(), conversation, context, images)
+        (c.root.clone(), conversation, context, images, item)
     };
-    let answer = agent.ask(&context, &images, &history(&conversation), &question);
+    let answer = crate::documents::context(&app, &root, &snapshot).and_then(|extra| {
+        agent.ask(
+            &format!("{context}{extra}"),
+            &images,
+            &history(&conversation),
+            &question,
+        )
+    });
     drop(client);
     let state = app.state::<State>();
     let guard = state

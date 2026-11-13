@@ -133,6 +133,8 @@ struct Store {
     active: Option<String>,
     model: Option<String>,
     accounts: Vec<Account>,
+    #[serde(default)]
+    send_only_attachments: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Account {
@@ -185,6 +187,7 @@ pub struct Status {
     pub model: Option<String>,
     pub connecting: bool,
     pub last_error: Option<String>,
+    pub send_only_attachments: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -392,7 +395,17 @@ impl Agent {
             model: self.store.model.clone(),
             connecting: self.connecting,
             last_error: self.last_error.clone(),
+            send_only_attachments: self.store.send_only_attachments,
         }
+    }
+    pub fn set_send_only_attachments(&mut self, enabled: bool) -> Result<()> {
+        let previous = self.store.send_only_attachments;
+        self.store.send_only_attachments = enabled;
+        if let Err(error) = self.persist() {
+            self.store.send_only_attachments = previous;
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn begin(&mut self, account_id: Option<String>) -> Result<Pending> {
         if self.connecting {
@@ -1140,6 +1153,34 @@ mod tests {
         let status = serde_json::to_string(&agent.status()).unwrap();
         assert!(!status.contains("access_token"));
         assert!(agent.status().accounts.is_empty());
+    }
+    #[test]
+    fn attachment_preference_defaults_for_legacy_store_and_survives_reopen() {
+        let legacy = r#"{"host_id":"host","active":null,"model":null,"accounts":[]}"#;
+        let mut agent =
+            Agent::with_vault(Box::new(Memory(Mutex::new(Some(legacy.into()))))).unwrap();
+        assert!(!agent.status().send_only_attachments);
+        agent.set_send_only_attachments(true).unwrap();
+        let saved = agent.vault.read().unwrap();
+        let mut reopened = Agent::with_vault(Box::new(Memory(Mutex::new(saved)))).unwrap();
+        assert!(reopened.status().send_only_attachments);
+        reopened.set_send_only_attachments(false).unwrap();
+        assert!(!reopened.status().send_only_attachments);
+    }
+    #[test]
+    fn failed_preference_save_keeps_previous_request_policy() {
+        struct ReadOnly;
+        impl Vault for ReadOnly {
+            fn read(&self) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn write(&self, _: &str) -> Result<()> {
+                Err("Read-only vault".into())
+            }
+        }
+        let mut agent = Agent::with_vault(Box::new(ReadOnly)).unwrap();
+        assert!(agent.set_send_only_attachments(true).is_err());
+        assert!(!agent.status().send_only_attachments);
     }
     #[test]
     fn streamed_usage_error_keeps_the_code_for_queue_pause() {

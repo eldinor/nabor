@@ -33,10 +33,12 @@ export async function copyText(text: string) {
 export async function confirmClearConversation() {
   return test() ? test()!.confirm() : confirm('Delete this item’s saved questions and replies?', { title: 'Clear conversation?', kind: 'warning' });
 }
-export async function choose(directory = false): Promise<string[] | string | null> {
+export async function choose(directory = false, kind: 'all' | 'images' | 'documents' = 'all'): Promise<string[] | string | null> {
   if (test()) return test()!.choose(directory);
   if (!isTauri()) throw new Error('File access is available in the Nabor desktop app. Run npm run tauri dev.');
-  return open({ directory, multiple: !directory, filters: directory ? undefined : [{ name: 'Images', extensions: ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff'] }] });
+  const images = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tif', 'tiff'];
+  const documents = ['pdf', 'docx', 'md', 'txt'];
+  return open({ directory, multiple: !directory, filters: directory ? undefined : [{ name: kind === 'images' ? 'Images' : kind === 'documents' ? 'Documents' : 'Images and documents', extensions: kind === 'images' ? images : kind === 'documents' ? documents : [...images, ...documents] }] });
 }
 export async function confirmation(message: string) { return test() ? test()!.confirm() : confirm(message, { title: 'Remove from collection?', kind: 'warning' }); }
 export async function confirmDiscardCaption() { return confirm('Discard the open caption draft and close Nabor?', { title: 'Unsaved caption draft', kind: 'warning' }); }

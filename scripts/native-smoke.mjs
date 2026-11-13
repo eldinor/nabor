@@ -1,11 +1,12 @@
 // Windows-only packaged-WebView smoke test. Uses real Rust IPC/filesystem and
 // asset protocol. Native dialog and system clipboard testing remain manual.
-import { chromium } from '@playwright/test';
+import { chromium, expect } from '@playwright/test';
 import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, copyFile, readFile, rename, access, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { documentFixtures } from './document-fixtures.mjs';
 
 if (process.platform !== 'win32') throw new Error('This smoke harness requires Windows WebView2.');
 const root = process.cwd();
@@ -14,10 +15,13 @@ const fixture = await mkdtemp(path.join(root, 'test-results', 'native-'));
 const collection = path.join(fixture, 'collection');
 const original = path.join(fixture, 'original image.png');
 const screenshot = path.join(fixture, 'caption screenshot.png');
+const documentFiles=await documentFixtures(fixture);
 await copyFile(path.join(root, 'src-tauri/icons/128x128.png'), original);
 await copyFile(original, screenshot);
 const executable = process.env.NABOR_EXE || path.join(root, 'src-tauri/target/debug/nabor.exe');
-const processHandle = spawn(executable, [], { windowsHide: true, env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9223' }, stdio: ['ignore', 'pipe', 'pipe'] });
+// Keep the debug browser options/profile separate from a running installed app.
+// https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/webview2-idl
+const processHandle = spawn(executable, [], { windowsHide: true, env: { ...process.env, WEBVIEW2_USER_DATA_FOLDER: path.join(fixture, 'webview-profile'), WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: '--remote-debugging-port=9223' }, stdio: ['ignore', 'pipe', 'pipe'] });
 processHandle.stdout.on('data', chunk => process.stdout.write(chunk));
 processHandle.stderr.on('data', chunk => process.stderr.write(chunk));
 processHandle.on('error', error => console.error('Native launch error:', error));
@@ -45,12 +49,13 @@ try {
   await page.getByLabel('Close agent settings').click();
   }
   const rpc = payload => page.evaluate(payload => window.__TAURI_INTERNALS__.invoke('request', { payload }), payload);
+  const ready = () => expect(page.getByRole('button',{name:'Blank item',exact:true})).toBeEnabled();
   await rpc({ action: 'open', path: collection, create: true });
   await rpc({ action: 'import', itemId: null, paths: [original], storage: 'copy' });
   await page.reload();
   await page.getByRole('button', { name: 'Open original image', exact: true }).click();
-  await page.getByLabel('CAPTION', { exact: true }).fill('Native caption — kept with the right image.');
-  await page.getByText('Saved locally', { exact: true }).waitFor();
+  await page.getByLabel('Caption', { exact: true }).fill('Native caption — kept with the right image.');
+  await page.getByText('Saved', { exact: true }).waitFor();
   const listed = await rpc({ action: 'list', query: '', filter: 'all', offset: 0, limit: 100 });
   assert.equal(listed.total, 1);
   const itemId = listed.items[0].id;
@@ -94,6 +99,7 @@ try {
   assert.equal((await rpc({action:'get',id:itemId})).caption,'Native caption — kept with the right image.');
   await page.getByLabel('Close item').click();
   const webSource='https://www.w3.org/Icons/w3c_home.png';
+  await ready();
   await page.locator('.inbox').evaluate((element,source)=>{const data=new DataTransfer();data.setData('text/html',`<a href="https://www.w3.org/"><img src="${source}"></a>`);data.setData('text/uri-list','https://www.w3.org/');element.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));},webSource);
   await page.getByRole('button',{name:/^Open w3c/}).waitFor();
   const webItems=await rpc({action:'list',query:'w3c',filter:'all',offset:0,limit:100});
@@ -104,9 +110,11 @@ try {
   assert.equal(webManifest.assets[0].sourceUrl,webSource);
   await page.getByRole('button',{name:'Blank item',exact:true}).click();
   const localBytes=Array.from(await readFile(original));
+  await ready();
   await page.locator('[data-item-tray]').evaluate((element,bytes)=>{const data=new DataTransfer();data.items.add(new File([new Uint8Array(bytes)],'local-drop.png',{type:'image/png'}));element.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));},localBytes);
   await page.getByLabel('Role for local-drop.png').waitFor();
   assert.equal(await page.getByLabel('Role for local-drop.png').inputValue(),'original');
+  await ready();
   await page.locator('[data-item-tray]').evaluate((element,bytes)=>{const data=new DataTransfer();data.items.add(new File([new Uint8Array(bytes)],'local-reference.png',{type:'image/png'}));element.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:data}));},localBytes);
   await page.getByLabel('Role for local-reference.png').waitFor();
   assert.equal(await page.getByLabel('Role for local-reference.png').inputValue(),'reference');
@@ -133,6 +141,11 @@ try {
   assert.equal((await rpc({action:'get',id:webItem.id})).caption,'Native retained edit');
   assert.equal((await batch({action:'status'})).draftCount,0);
   await page.getByLabel('Close caption drafts').click();
+  // Check theme switching in the actual WebView without touching the installed app profile.
+  await page.getByRole('button',{name:'Appearance',exact:true}).click();
+  await page.getByRole('menuitemradio',{name:'Dark',exact:true}).click();
+  assert.equal(await page.locator('html').getAttribute('data-theme'),'dark');
+  assert.equal(await page.locator('.workspace').evaluate(el=>getComputedStyle(el).backgroundColor),'rgb(28, 30, 34)');
   // Seed a saved conversation to exercise native reply actions without inference.
   const currentItem=await rpc({action:'get',id:itemId});
   const turnId=randomUUID();
@@ -140,7 +153,7 @@ try {
   await writeFile(path.join(collection,'items',itemId,'conversation.json'),JSON.stringify(chat));
   await page.getByRole('button',{name:'Open original image',exact:true}).click();
   await page.getByRole('button',{name:'Ask agent',exact:true}).click();
-  const discussion=page.getByRole('dialog',{name:'Ask agent',exact:true});
+  const discussion=page.getByRole('region',{name:'Ask agent',exact:true});
   await discussion.getByText('Native discussion reply',{exact:true}).waitFor();
   await discussion.getByRole('button',{name:'Add to notes',exact:true}).click();
   await discussion.getByText('Added to instructions.',{exact:true}).waitFor();
@@ -158,6 +171,61 @@ try {
   await discussion.getByText('Native discussion reply',{exact:true}).waitFor();
   await page.getByLabel('Close conversation').click();
   await page.getByLabel('Close item').click();
+  await page.getByLabel('Item layout',{exact:true}).selectOption('masonry');
+  const square=page.getByRole('button',{name:'Open original image',exact:true}).locator('img');
+  const landscape=page.getByRole('button',{name:/^Open w3c/}).locator('img');
+  await page.waitForFunction(()=>[...document.querySelectorAll('.layout-masonry .card-image img')].every(i=>i.complete&&i.naturalWidth>0));
+  const squareBox=await square.boundingBox(),landscapeBox=await landscape.boundingBox();
+  assert(Math.abs(squareBox.width-squareBox.height)<2,'Square preview must keep its proportions');
+  assert(Math.abs(landscapeBox.width/landscapeBox.height-1.5)<0.02,'Landscape preview must keep its proportions');
+  await page.screenshot({path:path.join(root,'test-results','native-masonry.png')});
+  await page.getByLabel('Item layout',{exact:true}).selectOption('grid');
+  await ready();
+  await page.getByRole('button',{name:'Open original image',exact:true}).click();
+  const beforeLink=await rpc({action:'get',id:itemId});
+  await page.getByRole('button',{name:'Add link',exact:true}).click();
+  const linkEditor=page.getByRole('dialog',{name:'Add link',exact:true});
+  await linkEditor.getByLabel('URL',{exact:true}).fill('https://example.com/reference');
+  await linkEditor.getByLabel('Title (optional)',{exact:true}).fill('Website reference');
+  await linkEditor.getByLabel('Notes (optional)',{exact:true}).fill('User notes for this website');
+  await linkEditor.getByRole('button',{name:'Save link',exact:true}).click();
+  await page.locator('.website-attachment').getByRole('button',{name:'Open in browser',exact:true}).waitFor();
+  const withLink=await rpc({action:'get',id:itemId});
+  assert.equal(withLink.links[0].url,'https://example.com/reference');
+  assert.equal(withLink.schemaVersion,2);
+  assert.equal(withLink.caption,beforeLink.caption);
+  await access(path.join(collection,'items',itemId,`item.v1.${beforeLink.sourceHash.slice(0,16)}.backup.json`));
+  const linkedExport=await rpc({action:'export',ids:[itemId],parent:fixture});
+  const linkedManifest=JSON.parse(await readFile(path.join(linkedExport,'items',itemId,'item.json'),'utf8'));
+  assert.equal(linkedManifest.links[0].notes,'User notes for this website');
+  assert.equal(JSON.parse(await readFile(path.join(linkedExport,'package.json'),'utf8')).schemaVersion,2);
+  await ready();await page.getByLabel('Close item').click();await ready();
+  await page.getByRole('button',{name:'Open original image',exact:true}).click();
+  await page.locator('.website-attachment').getByText('Website reference',{exact:true}).waitFor();
+  await page.locator('.website-attachment').scrollIntoViewIfNeeded();
+  await page.screenshot({path:path.join(root,'test-results','native-links.png')});
+  await ready();await page.getByLabel('Close item').click();
+  // Real helper-process extraction for all supported document formats.
+  for(const[name,expected]of [['reference.pdf','Native PDF evidence'],['reference.docx','42 mm'],['reference.md','Native Markdown evidence'],['reference.txt','Native plain text evidence']]){
+    const result=await rpc({action:'import',itemId:null,paths:[documentFiles[name]],storage:name.endsWith('.txt')?'link':'copy'});
+    const docItem=result[0],doc=docItem.documents[0];
+    const extracted=await rpc({action:'documentText',itemId:docItem.id,documentId:doc.id});
+    assert.equal(extracted.status,'ready',`${name}: ${extracted.warning}`);assert(extracted.text.includes(expected),name);
+    const out=await rpc({action:'export',ids:[docItem.id],parent:fixture});const stored=JSON.parse(await readFile(path.join(out,'items',docItem.id,'item.json'),'utf8'));
+    assert.equal(stored.schemaVersion,3);assert.deepEqual(await readFile(path.join(out,'items',docItem.id,stored.documents[0].path)),await readFile(documentFiles[name]));
+    if(name.endsWith('.md')){
+      await page.getByRole('button',{name:'Refresh & check files',exact:true}).click();await ready();
+      await page.getByRole('button',{name:'Open reference',exact:true}).first().click();
+      // Item titles can repeat: open the known document through the card's ID.
+      await page.getByLabel('Close item').click();await ready();
+      await page.locator(`[data-drop-item="${docItem.id}"] .card-image`).click();
+      await page.locator('.document-attachment').getByRole('button',{name:'View text',exact:true}).click();
+      await page.getByRole('dialog',{name:'Extracted document text',exact:true}).getByText(/Native Markdown evidence/).waitFor();
+      await page.screenshot({path:path.join(root,'test-results','native-documents.png')});
+      await page.getByLabel('Close document text').click();await page.getByLabel('Close item').click();await ready();
+    }
+  }
+  for(const[name,status]of [['no-text.pdf','empty'],['broken.pdf','error']]){const [i]=await rpc({action:'import',itemId:null,paths:[documentFiles[name]],storage:'copy'});const t=await rpc({action:'documentText',itemId:i.id,documentId:i.documents[0].id});assert.equal(t.status,status,name);}
   await page.screenshot({ path: path.join(root, 'test-results', 'native-desktop.png') });
   await rpc({ action: 'remove', ids: [itemId] });
   await access(`${screenshot}.moved.png`);

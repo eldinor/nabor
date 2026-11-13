@@ -71,6 +71,9 @@ pub enum AgentRequest {
     SelectModel {
         model_id: String,
     },
+    SetSendOnlyAttachments {
+        enabled: bool,
+    },
     Usage,
     LaunchIntent,
     SelectAccount {
@@ -190,6 +193,7 @@ fn perform(app: tauri::AppHandle, payload: AgentRequest) -> Result<Value, String
             }
             _ => unreachable!(),
         };
+        let only_attachments = send_only_attachments(&app)?;
         // Resolve only this item while holding its collection lock, then release
         // it before any network operation. Do not send source filesystem paths.
         let (snapshot, context, images, root, common, previous_draft) = {
@@ -230,28 +234,10 @@ fn perform(app: tauri::AppHandle, payload: AgentRequest) -> Result<Value, String
                     "This item changed. Reopen its caption before requesting a revision.".into(),
                 );
             }
-            if item.assets.is_empty() {
-                return Err("Attach an image or reference before generating a caption".into());
-            }
-            if item.assets.len() > 20 {
-                return Err("This first integration supports up to 20 images per item".into());
-            }
-            if !c.check(&[item_id])?.is_empty() {
-                return Err("Locate missing files before generating a caption".into());
-            }
-            let mut images = vec![];
-            for (n, asset) in item.assets.iter().enumerate() {
-                let role = match asset.role {
-                    nabor_core::Role::Original => "original image",
-                    nabor_core::Role::CaptionSource => "caption source reference",
-                    nabor_core::Role::Reference => "reference",
-                };
-                let bytes = nabor_core::agent_image(&c.resolve(&item, asset)?)?;
-                images.push((format!("Image {}: {role}", n + 1), bytes));
-            }
+            let images = c.agent_images(&item, only_attachments, true)?;
             let context = caption_context(
                 &item.title,
-                &item.notes,
+                &item.agent_reference_notes(),
                 revision
                     .as_ref()
                     .map(|(_, caption, instructions)| (caption.as_str(), instructions.as_str())),
@@ -266,6 +252,11 @@ fn perform(app: tauri::AppHandle, payload: AgentRequest) -> Result<Value, String
                 previous_draft,
             )
         };
+        let context = format!(
+            "{context}{}{}",
+            image_scope(only_attachments),
+            crate::documents::context(&app, &root, &snapshot)?
+        );
         let mut guard = state.client.lock().map_err(|_| "Agent lock failed")?;
         initialize(&app, &state, &mut guard)?;
         let client = guard.as_mut().unwrap();
@@ -312,6 +303,7 @@ fn perform(app: tauri::AppHandle, payload: AgentRequest) -> Result<Value, String
             AgentRequest::SignIn { .. }
                 | AgentRequest::SelectAccount { .. }
                 | AgentRequest::SelectModel { .. }
+                | AgentRequest::SetSendOnlyAttachments { .. }
                 | AgentRequest::Disconnect
         )
     {
@@ -321,6 +313,10 @@ fn perform(app: tauri::AppHandle, payload: AgentRequest) -> Result<Value, String
     let client = guard.as_mut().unwrap();
     match payload {
         AgentRequest::Status => Ok(json!(client.status())),
+        AgentRequest::SetSendOnlyAttachments { enabled } => {
+            client.set_send_only_attachments(enabled)?;
+            Ok(json!(client.status()))
+        }
         AgentRequest::SignIn { account_id } => {
             state.cancel.store(false, Ordering::Relaxed);
             let pending = client.begin(account_id)?;
@@ -404,6 +400,22 @@ mod tests {
     }
 }
 
+pub(crate) fn send_only_attachments(app: &tauri::AppHandle) -> Result<bool, String> {
+    let state = app.state::<AgentState>();
+    let guard = state.client.lock().map_err(|_| "Agent lock failed")?;
+    // A read-only batch preview must not take ownership of the sign-in session.
+    Ok(match guard.as_ref() {
+        Some(client) => client.status().send_only_attachments,
+        None => Agent::new()?.status().send_only_attachments,
+    })
+}
+pub(crate) fn image_scope(only_attachments: bool) -> &'static str {
+    if only_attachments {
+        "\nThe user excluded the main original image from this request. Use only the supplied attachments and text; do not claim to have seen the main image.\n"
+    } else {
+        ""
+    }
+}
 pub(crate) fn generate_for_batch(
     app: &tauri::AppHandle,
     root: &std::path::Path,
@@ -413,6 +425,7 @@ pub(crate) fn generate_for_batch(
     model: &str,
     job_id: &str,
 ) -> Result<nabor_core::CaptionDraftRecord, String> {
+    let only_attachments = send_only_attachments(app)?;
     let (item, context, images) = {
         let state = app.state::<State>();
         let guard = state
@@ -427,22 +440,15 @@ pub(crate) fn generate_for_batch(
         if !item.caption.trim().is_empty() {
             return Err("Item now has a caption".into());
         }
-        if item.assets.is_empty()
-            || item.assets.len() > 20
-            || !c.check(&[item_id.into()])?.is_empty()
-        {
-            return Err("Item needs 1–20 available images".into());
-        }
-        let mut images = vec![];
-        for (n, a) in item.assets.iter().enumerate() {
-            images.push((
-                format!("Image {}: {:?}", n + 1, a.role),
-                nabor_core::agent_image(&c.resolve(&item, a)?)?,
-            ));
-        }
-        let context = caption_context(&item.title, &item.notes, None, prompt);
+        let images = c.agent_images(&item, only_attachments, true)?;
+        let context = caption_context(&item.title, &item.agent_reference_notes(), None, prompt);
         (item, context, images)
     };
+    let context = format!(
+        "{context}{}{}",
+        image_scope(only_attachments),
+        crate::documents::context(app, root, &item)?
+    );
     let state = app.state::<AgentState>();
     let mut guard = state.client.lock().map_err(|_| "Agent lock failed")?;
     initialize(app, &state, &mut guard)?;

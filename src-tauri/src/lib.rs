@@ -8,8 +8,12 @@ use std::{
 use tauri::{Emitter, Manager};
 mod agent;
 mod batch;
+mod documents;
 mod talk;
 mod web_import;
+pub fn document_worker_main() -> bool {
+    documents::worker_main()
+}
 fn batch_active(app: &tauri::AppHandle) -> bool {
     app.state::<batch::Runtime>()
         .active
@@ -72,6 +76,55 @@ enum Request {
         item_id: String,
         asset_id: String,
     },
+    SaveLink {
+        item_id: String,
+        expected_hash: String,
+        link_id: Option<String>,
+        url: String,
+        title: String,
+        notes: String,
+    },
+    RemoveLink {
+        item_id: String,
+        expected_hash: String,
+        link_id: String,
+    },
+    OpenLink {
+        item_id: String,
+        link_id: String,
+    },
+    ImportDocument {
+        item_id: Option<String>,
+        filename: String,
+        bytes_base64: String,
+    },
+    DocumentText {
+        item_id: String,
+        document_id: String,
+    },
+    OpenDocument {
+        item_id: String,
+        document_id: String,
+    },
+    RefreshDocument {
+        item_id: String,
+        document_id: String,
+        expected_hash: String,
+        path: Option<String>,
+    },
+    UpdateDocument {
+        item_id: String,
+        document_id: String,
+        expected_hash: String,
+        title: String,
+        notes: String,
+        role: Role,
+    },
+    RemoveDocument {
+        item_id: String,
+        document_id: String,
+        expected_hash: String,
+    },
     Clipboard {
         item_id: Option<String>,
         rgba: Vec<u8>,
@@ -123,6 +176,14 @@ enum Request {
 }
 
 fn perform(app: tauri::AppHandle, payload: Request) -> Result<Value, String> {
+    if let Request::DocumentText {
+        item_id,
+        document_id,
+    } = &payload
+    {
+        let (root, item, d) = documents::snapshot(&app, item_id, document_id)?;
+        return Ok(json!(documents::text(&app, &root, &item, &d)?));
+    }
     let state = app.state::<State>();
     let mut guard = state
         .collection
@@ -215,6 +276,88 @@ fn perform(app: tauri::AppHandle, payload: Request) -> Result<Value, String> {
             open::that(source.as_str()).map_err(|_| "Cannot open the source website")?;
             Value::Null
         }
+        Request::SaveLink {
+            item_id,
+            expected_hash,
+            link_id,
+            url,
+            title,
+            notes,
+        } => json!(c.save_website_link(
+            &item_id,
+            &expected_hash,
+            link_id.as_deref(),
+            url,
+            title,
+            notes
+        )?),
+        Request::RemoveLink {
+            item_id,
+            expected_hash,
+            link_id,
+        } => json!(c.remove_website_link(&item_id, &expected_hash, &link_id)?),
+        Request::OpenLink { item_id, link_id } => {
+            let url = c.website_link_url(&item_id, &link_id)?;
+            open::that(&url).map_err(|_| "Cannot open this link in your browser")?;
+            Value::Null
+        }
+        Request::DocumentText { .. } => unreachable!(),
+        Request::ImportDocument {
+            item_id,
+            filename,
+            bytes_base64,
+        } => {
+            if bytes_base64.len() > 28_000_000 {
+                return Err("Document exceeds the 20 MB limit".into());
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(bytes_base64)
+                .map_err(|_| "Invalid document bytes")?;
+            json!(c.import_document(item_id.as_deref(), &filename, &bytes, Storage::Copy, None)?)
+        }
+        Request::OpenDocument {
+            item_id,
+            document_id,
+        } => {
+            let item = c.load(&item_id)?;
+            let d = item
+                .documents
+                .iter()
+                .find(|d| d.id == document_id)
+                .ok_or("Document not found")?;
+            let path = nabor_core::document_path(&c.root, &item, d)?
+                .canonicalize()
+                .map_err(|_| "Locate the missing document first")?;
+            nabor_core::document_extension(&path)?;
+            open::that(&path).map_err(|_| "Cannot open document in its default app")?;
+            Value::Null
+        }
+        Request::RefreshDocument {
+            item_id,
+            document_id,
+            expected_hash,
+            path,
+        } => json!(c.refresh_document(
+            &item_id,
+            &document_id,
+            &expected_hash,
+            path.as_deref().map(std::path::Path::new)
+        )?),
+        Request::UpdateDocument {
+            item_id,
+            document_id,
+            expected_hash,
+            title,
+            notes,
+            role,
+        } => {
+            json!(c.update_document(&item_id, &document_id, &expected_hash, title, notes, role)?)
+        }
+        Request::RemoveDocument {
+            item_id,
+            document_id,
+            expected_hash,
+        } => json!(c.remove_document(&item_id, &document_id, &expected_hash)?),
         Request::Clipboard {
             item_id,
             rgba,
@@ -269,11 +412,7 @@ fn perform(app: tauri::AppHandle, payload: Request) -> Result<Value, String> {
             for item_id in ids.into_iter().take(200) {
                 let item = c.load(&item_id)?;
                 for asset in &item.assets {
-                    let path = c
-                        .root
-                        .join(".nabor/thumbnails")
-                        .join(format!("{}.jpg", asset.id));
-                    if path.exists() {
+                    if let Some(path) = nabor_core::cached_thumbnail(&c.root, &asset.id) {
                         app.asset_protocol_scope()
                             .allow_file(&path)
                             .map_err(|e| e.to_string())?;
@@ -332,6 +471,7 @@ pub fn run() {
         .setup(|app| {
             app.manage(agent::AgentState::default());
             app.manage(batch::Runtime::default());
+            app.manage(documents::Runtime::default());
             let (sender, receiver) = mpsc::channel::<ThumbnailJob>();
             app.manage(State {
                 collection: Mutex::new(None),

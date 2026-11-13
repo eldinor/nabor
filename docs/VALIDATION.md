@@ -27,6 +27,20 @@ Test artifacts and screenshots are written under `test-results/`. The harness le
 
 ## Native manual acceptance checklist
 
+### Attachment-only agent input (0.8.2)
+
+On Windows, all 61 Rust tests and 35 UI scenarios have passed. New filesystem checks prove the main image's bytes are excluded while references are retained, a missing excluded original does not block generation, missing included references still block it, image limits count only included files, caption-source role changes remain effective, and batch preview eligibility matches the request policy. Account-store tests cover legacy defaults, preference persistence after reopening, and rollback on failed saves. The UI check covers changing, reopening, resetting, and reporting failed preference saves; a cold development-server navigation needed a longer test timeout. The appearance keyboard check now waits for the menu's initial focus before sending navigation keys.
+
+The shared input selector serves individual captions, revisions, batch generation, and item questions. The setting defaults off, is saved locally with agent preferences, and cannot change during an active batch. Existing unaccepted drafts are retained. No live inference is needed for these checks.
+
+The native Windows smoke test passed with real IPC, image loading, document extraction, batch previews, broken-link repair, and byte-exact exports. It did not change the user's agent preferences or request inference. The unsigned 0.8.2 Windows NSIS installer was built successfully; macOS runtime checks remain pending.
+
+### Appearance (0.8.0)
+
+On Windows, 34 UI scenarios have passed, and all 56 Rust tests pass: 40 core/filesystem, 9 agent, and 7 desktop backend. Appearance checks cover the System default, live operating-system changes, saved manual overrides after reload, keyboard-accessible radio menu choices, narrow-window access, retained caption edits and unsent questions, readable error states, and unfiltered image previews. Thumbnail tests verify transparency, automatic rebuilding of legacy JPEG caches, opaque JPEG output, removal of obsolete cache formats, retained previews for missing originals, and unchanged original bytes.
+
+The hidden native Windows WebView2 smoke test passed with actual Rust IPC and filesystem operations. It switched to Dark, checked the workspace palette, exercised conversation and caption review, displayed extracted document text, and passed existing copy/link, missing-file repair, image import, and byte-exact export checks. No agent inference was requested. Dark inspector, conversation, and document views were inspected visually. macOS runtime appearance, native dialogs, installer upgrade, and signed-release checks still require their target environments.
+
 ### Batch captions (0.3.0)
 
 On Windows, 17 Playwright scenarios and 36 Rust tests pass (22 collection/core, 8 agent, 6 desktop backend). Coverage includes collection-wide queries beyond the visible page, selected IDs across pages, common prompt precedence, skipping saved captions and drafts, persistent draft revisions, interrupted-run recovery, pause/resume/cancel, retrying item failures, pausing on usage/authentication errors, and refusing stale draft acceptance. Exports exclude unaccepted drafts.
@@ -40,6 +54,32 @@ On Windows, 20 Playwright scenarios and 42 Rust tests pass (26 collection/core, 
 The hidden Windows WebView smoke test also passed real conversation IPC: reopening a saved fixture reply, appending it to existing instructions, opening it for caption review and discarding without replacing the final caption, and exporting without conversation content. It repeated existing filesystem, queue/draft, and byte-exact export checks. Screenshot: `test-results/native-conversation.png`.
 
 These checks use fixture responses and make no inference requests. Live conversation requests, native clipboard copying, macOS behavior, and signed installer acceptance remain unverified.
+
+### Inbox masonry (0.4.1)
+
+All 23 UI scenarios pass. New coverage verifies portrait/landscape proportions, resize when opening the item tray, view preference after reload, switching back to the fixed grid, missing/broken previews, and virtualized scrolling, paging, selection, and search in a 10,000-item fixture. Rendered cards remain bounded and do not overlap. The frontend production build passes; the Rust implementation is unchanged.
+
+The Windows native WebView smoke check also passes with real cached square and landscape images. It checks their displayed aspect ratios in masonry, switches back to grid, and repeats the filesystem, caption, draft, conversation, and export checks. Screenshot: `test-results/native-masonry.png`. The harness now waits for import controls to become enabled before dispatching synthetic drops, avoiding a race with the previous action. macOS native verification remains outstanding.
+
+### Website attachments (0.5.0)
+
+All 26 UI scenarios pass, including adding/reopening/editing/removing links, opening the correct stored link through IPC, clipboard copying, searching URL/title/notes, retaining a failed save, and moving a website reference between items. All 48 Rust tests pass across the existing suites and six new website tests. Coverage includes legacy-item promotion with an exact backup, failure to create a backup, stale edit/removal rejection, unsafe URL rejection, text bounds, collection transfer, index rebuilding, link-only batch eligibility, reference context, moves, and versioned exports preserving original image bytes.
+
+The Windows native WebView smoke test also passes: adding a link through the UI, reopening the item, retaining its prior caption, creating the version 1 backup, and exporting the link and notes with schema version 2. Screenshot: `test-results/native-links.png`. The harness uses its own WebView profile so it can run alongside an installed app. It does not fetch attached websites, launch the external browser, or consume ChatGPT usage. Browser-launch behavior, macOS verification, and signing remain manual release gates.
+
+### Document attachments (0.6.0)
+
+All 29 UI scenarios and 54 Rust tests pass. New document checks cover PDF text, DOCX paragraph/entity/table text, Markdown, UTF-8/UTF-16 text, copy/link import, mixed image/document imports, cached/missing/changed sources, explicit reconnection, moves, details/roles, removal without deleting linked originals, schema 1/2 backups before version 3 promotion, cache rebuilding, source conflicts at caption acceptance/export, and byte-exact document exports. Empty/scanned-style and damaged PDF fixtures report extraction status; large text is explicitly truncated. The UI regression also verifies pending manual caption edits survive document detail changes.
+
+The Windows WebView smoke harness passed real document IPC and helper-process extraction for PDF, DOCX, MD, and TXT. It verified original-byte exports, schema version 3, visible extracted-text preview, and empty/damaged PDF status. A separate check, `node scripts/document-worker-smoke.mjs`, passed all four formats against the release GUI-subsystem executable through its CLI helper entry point with redirected output and no visible window. Tests use a separate collection and do not consume ChatGPT usage. The helper has a 20-second process timeout and hides its Windows console.
+
+Live document-backed ChatGPT inference, opening originals in external applications, macOS native behavior, and signed installer acceptance remain unverified. OCR, embedded image analysis, legacy DOC/RTF, and Word layout fidelity are outside this release. The agent receives extracted text rather than raw document uploads; previews are capped at 128,000 UTF-8 bytes and request body text at 100,000 bytes across document references, with truncation markers.
+
+### Desktop interface (0.7.0)
+
+All 32 UI scenarios pass, including existing capture, captions, revisions, batch queues, links, documents, and export fixtures. New checks assert 15 px caption/conversation text and 14 px navigation, persistent inspector resizing by pointer and keyboard, narrow-window layout without horizontal overflow, menu keyboard navigation/Escape/outside dismissal, collection-search shortcut, non-modal agent layout, included-image preview, and retention of unsent questions when switching items. A menu issue caused by scrolling near the inspector footer was corrected and its workflow checks pass.
+
+Windows native WebView smoke checks pass through real IPC with the redesigned controls, including save states, revision history, draft acceptance, website attachments, document helper extraction, masonry ratios, and byte-exact exports. Screenshots are generated as `test-results/native-links.png` and `test-results/native-conversation.png`. Rust collection/agent behavior and file formats are unchanged in this release; the Rust suites were not rerun for styling changes. SF font rendering and native macOS acceptance still require a Mac.
 
 Record results separately on Windows, macOS Apple Silicon, and macOS Intel. An unchecked gate remains unverified.
 

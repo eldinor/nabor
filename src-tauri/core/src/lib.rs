@@ -11,6 +11,10 @@ mod captions;
 pub use captions::*;
 mod conversation;
 pub use conversation::*;
+mod links;
+pub use links::*;
+mod documents;
+pub use documents::*;
 
 pub type Result<T> = std::result::Result<T, String>;
 pub const VERSION: u32 = 1;
@@ -80,6 +84,10 @@ pub struct Item {
     pub updated_at: u64,
     pub revision: u64,
     pub assets: Vec<Asset>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<WebsiteLink>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<DocumentAttachment>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_hash: String,
 }
@@ -96,12 +104,22 @@ impl Item {
             updated_at: now(),
             revision: 0,
             assets: vec![],
+            links: vec![],
+            documents: vec![],
             source_hash: String::new(),
         }
     }
     fn validate(&self) -> Result<()> {
-        if self.schema_version != VERSION {
-            return Err(format!("Unsupported item schema {}. This app supports version {VERSION}; the manifest was left untouched.", self.schema_version));
+        if ![1, 2, 3].contains(&self.schema_version) {
+            return Err(format!("Unsupported item schema {}. This app supports versions 1, 2, and 3; the manifest was left untouched.", self.schema_version));
+        }
+        if self.schema_version == 1 && !self.links.is_empty() {
+            return Err("Website attachments require item schema 2".into());
+        }
+        validate_links(&self.links)?;
+        validate_documents(&self.documents)?;
+        if self.schema_version < 3 && !self.documents.is_empty() {
+            return Err("Document attachments require item schema 3".into());
         }
         valid_id(&self.id)?;
         if self
@@ -123,6 +141,16 @@ impl Item {
                 safe_relative(&a.path)?;
             } else if !Path::new(&a.path).is_absolute() {
                 return Err("Linked paths must be absolute".into());
+            }
+        }
+        for link in &self.links {
+            if !ids.insert(&link.id) {
+                return Err("Duplicate attachment ID".into());
+            }
+        }
+        for d in &self.documents {
+            if !ids.insert(&d.id) {
+                return Err("Duplicate attachment ID".into());
             }
         }
         Ok(())
@@ -234,6 +262,7 @@ impl Collection {
         if item.source_hash != expected_hash || !item.caption.trim().is_empty() {
             return Err("This item changed or already has a caption. Generate a new draft after reviewing the item.".into());
         }
+        validate_document_sources(&self.root, &item)?;
         item.caption = caption;
         self.update(&mut item)?;
         Ok(item)
@@ -253,6 +282,7 @@ impl Collection {
                 "This item changed. Reopen its caption before saving a replacement.".into(),
             );
         }
+        validate_document_sources(&self.root, &item)?;
         item.caption = caption;
         self.update(&mut item)?;
         Ok(item)
@@ -375,6 +405,39 @@ impl Collection {
         Ok(p)
     }
     fn save_new_revision(&self, item: &mut Item) -> Result<()> {
+        let target_version = if !item.documents.is_empty() {
+            3
+        } else if !item.links.is_empty() {
+            2
+        } else {
+            item.schema_version
+        };
+        if item.schema_version < target_version {
+            let disk = self.load(&item.id)?;
+            if disk.revision != item.revision || disk.source_hash != item.source_hash {
+                return Err("This item changed externally. Refresh before saving.".into());
+            }
+            let dir = self.item_dir(&item.id)?;
+            let backup = dir.join(format!(
+                "item.v{}.{}.backup.json",
+                disk.schema_version,
+                &disk.source_hash[..16]
+            ));
+            if backup.exists() {
+                no_symlink(&backup)?;
+                if !backup.is_file()
+                    || fs::read(&backup).map_err(err)?
+                        != fs::read(dir.join("item.json")).map_err(err)?
+                {
+                    return Err(
+                        "The migration backup already exists and does not match this item".into(),
+                    );
+                }
+            } else {
+                atomic_write(&backup, &fs::read(dir.join("item.json")).map_err(err)?)?;
+            }
+            item.schema_version = target_version;
+        }
         item.validate()?;
         let dir = self.item_dir(&item.id)?;
         if dir.join("item.json").exists() {
@@ -420,6 +483,12 @@ impl Collection {
         {
             return Err("Use attachment commands to change assets".into());
         }
+        if existing.links != item.links
+            || existing.documents != item.documents
+            || existing.schema_version != item.schema_version
+        {
+            return Err("Use link attachment commands to change website links".into());
+        }
         self.save_new_revision(item)
     }
     pub fn create_item(&self) -> Result<Item> {
@@ -436,7 +505,10 @@ impl Collection {
         // Validate every input before changing anything.
         for s in paths {
             let p = Path::new(s);
-            image_extension(p)?;
+            if image_extension(p).is_err() {
+                document_extension(p)?;
+                document_bytes(p)?;
+            }
             if !p.is_file() {
                 return Err(format!("File unavailable: {}", p.display()));
             }
@@ -444,6 +516,20 @@ impl Collection {
         if let Some(item_id) = item_id {
             let mut item = self.load(item_id)?;
             for s in paths {
+                if document_extension(Path::new(s)).is_ok() {
+                    self.add_document(
+                        &mut item,
+                        Path::new(s)
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_str()
+                            .ok_or("Invalid document filename")?,
+                        &document_bytes(Path::new(s))?,
+                        storage.clone(),
+                        Some(Path::new(s)),
+                    )?;
+                    continue;
+                }
                 let role = if item.assets.iter().any(|a| a.role == Role::Original) {
                     Role::Reference
                 } else {
@@ -457,6 +543,21 @@ impl Collection {
             let mut items = vec![];
             for s in paths {
                 let p = Path::new(s);
+                if document_extension(p).is_ok() {
+                    items.push(
+                        self.import_document(
+                            None,
+                            p.file_name()
+                                .unwrap_or_default()
+                                .to_str()
+                                .ok_or("Invalid document filename")?,
+                            &document_bytes(p)?,
+                            storage.clone(),
+                            Some(p),
+                        )?,
+                    );
+                    continue;
+                }
                 let mut item = Item::empty();
                 item.title = p.file_stem().unwrap_or_default().to_string_lossy().into();
                 self.add_file(&mut item, p, storage.clone(), Role::Original)?;
@@ -617,6 +718,32 @@ impl Collection {
         }
         let mut source = self.load(from)?;
         let mut target = self.load(to)?;
+        if let Some(mut d) = source.documents.iter().find(|d| d.id == asset_id).cloned() {
+            let original = document_path(&self.root, &source, &d)?;
+            let bytes = document_bytes(&original)?;
+            d.id = id();
+            if d.storage == Storage::Copy {
+                let path = format!("assets/{}.{}", d.id, d.format);
+                atomic_write(&self.item_dir(&target.id)?.join(&path), &bytes)?;
+                d.path = path;
+            }
+            d.role = Role::Reference;
+            d.content_hash = hash(&bytes);
+            target.documents.push(d);
+            self.save_new_revision(&mut target)?;
+            source.documents.retain(|d| d.id != asset_id);
+            self.save_new_revision(&mut source)?;
+            return Ok(());
+        }
+        if let Some(mut link) = source.links.iter().find(|l| l.id == asset_id).cloned() {
+            link.id = id();
+            target.links.push(link);
+            // As with files, save the destination before removing the source.
+            self.save_new_revision(&mut target)?;
+            source.links.retain(|l| l.id != asset_id);
+            self.save_new_revision(&mut source)?;
+            return Ok(());
+        }
         let a = source
             .assets
             .iter()
@@ -671,7 +798,12 @@ impl Collection {
         let missing = item
             .assets
             .iter()
-            .any(|a| self.resolve(item, a).map(|p| !p.is_file()).unwrap_or(true));
+            .any(|a| self.resolve(item, a).map(|p| !p.is_file()).unwrap_or(true))
+            || item.documents.iter().any(|d| {
+                document_path(&self.root, item, d)
+                    .map(|p| !p.is_file())
+                    .unwrap_or(true)
+            });
         let original = item.assets.iter().find(|a| a.role == Role::Original);
         let missing_original =
             original.is_none_or(|a| self.resolve(item, a).map(|p| !p.is_file()).unwrap_or(true));
@@ -690,9 +822,23 @@ impl Collection {
                         .iter()
                         .map(|a| a.filename.as_str())
                         .collect::<Vec<_>>()
-                        .join(" "),
+                        .join(" ")
+                        + " "
+                        + &item
+                            .links
+                            .iter()
+                            .flat_map(|l| [&*l.title, &*l.url, &*l.notes])
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                        + " "
+                        + &item
+                            .documents
+                            .iter()
+                            .flat_map(|d| [&*d.filename, &*d.title, &*d.notes])
+                            .collect::<Vec<_>>()
+                            .join(" "),
                     item.updated_at,
-                    item.assets.len(),
+                    item.assets.len() + item.links.len() + item.documents.len(),
                     missing_original,
                     missing,
                     item.caption.trim().is_empty(),
@@ -775,6 +921,57 @@ impl Collection {
             .map_err(err)?;
         Ok(Page { items, total })
     }
+    /// Select and validate exactly the material included in an agent request.
+    pub fn agent_assets<'a>(
+        &self,
+        item: &'a Item,
+        only_attachments: bool,
+        require_material: bool,
+    ) -> Result<Vec<&'a Asset>> {
+        let assets: Vec<_> = item
+            .assets
+            .iter()
+            .filter(|a| !only_attachments || a.role != Role::Original)
+            .collect();
+        if require_material
+            && assets.is_empty()
+            && item.links.is_empty()
+            && item.documents.is_empty()
+        {
+            return Err(if only_attachments { "Add reference attachments or turn off Send only attachments before generating a caption" } else { "Attach an image or reference before generating a caption" }.into());
+        }
+        if assets.len() > 20 {
+            return Err("Agent requests support up to 20 included images".into());
+        }
+        for asset in &assets {
+            if !self.resolve(item, asset)?.is_file() {
+                return Err(format!("Locate missing file: {}", asset.filename));
+            }
+        }
+        for doc in &item.documents {
+            if !document_path(&self.root, item, doc)?.is_file() {
+                return Err(format!("Locate missing file: {}", doc.filename));
+            }
+        }
+        Ok(assets)
+    }
+    pub fn agent_images(
+        &self,
+        item: &Item,
+        only_attachments: bool,
+        require_material: bool,
+    ) -> Result<Vec<(String, Vec<u8>)>> {
+        self.agent_assets(item, only_attachments, require_material)?
+            .into_iter()
+            .enumerate()
+            .map(|(n, asset)| {
+                Ok((
+                    format!("Image {}: {:?}", n + 1, asset.role),
+                    agent_image(&self.resolve(item, asset)?)?,
+                ))
+            })
+            .collect()
+    }
     pub fn check(&self, ids: &[String]) -> Result<Vec<Missing>> {
         let mut missing = vec![];
         for item_id in ids {
@@ -787,6 +984,16 @@ impl Collection {
                         title: item.title.clone(),
                         asset_id: a.id.clone(),
                         filename: a.filename.clone(),
+                    });
+                }
+            }
+            for d in &item.documents {
+                if !document_path(&self.root, &item, d)?.is_file() {
+                    missing.push(Missing {
+                        item_id: item.id.clone(),
+                        title: item.title.clone(),
+                        asset_id: d.id.clone(),
+                        filename: d.filename.clone(),
                     });
                 }
             }
@@ -830,8 +1037,10 @@ impl Collection {
             .tempdir_in(&parent)
             .map_err(err)?;
         let mut exported = vec![];
+        let mut package_version = VERSION;
         for item_id in ids {
             let mut item = self.load(item_id)?;
+            package_version = package_version.max(item.schema_version);
             let original = item.clone();
             item.source_hash.clear();
             item.caption_history.clear();
@@ -845,6 +1054,21 @@ impl Collection {
                 a.path = relative;
                 a.storage = Storage::Copy;
             }
+            for d in &mut item.documents {
+                let source = document_path(&self.root, &original, d)?;
+                let bytes = document_bytes(&source)?;
+                if hash(&bytes) != d.content_hash {
+                    return Err(format!(
+                        "{} changed. Re-extract its text before exporting.",
+                        d.filename
+                    ));
+                }
+                let relative = format!("assets/{}.{}", d.id, d.format);
+                atomic_write(&dir.join(&relative), &bytes)?;
+                d.path = relative;
+                d.storage = Storage::Copy;
+                d.content_hash = hash(&bytes);
+            }
             atomic_write(&dir.join("caption.txt"), item.caption.as_bytes())?;
             atomic_write(
                 &dir.join("item.json"),
@@ -852,12 +1076,12 @@ impl Collection {
             )?;
             exported.push(format!("items/{item_id}/item.json"));
         }
-        let manifest = serde_json::json!({"schemaVersion":VERSION,"format":"nabor-agent-package","items":exported});
+        let manifest = serde_json::json!({"schemaVersion":package_version,"format":"nabor-agent-package","items":exported});
         atomic_write(
             &staging.path().join("package.json"),
             &serde_json::to_vec_pretty(&manifest).map_err(err)?,
         )?;
-        atomic_write(&staging.path().join("README.md"),b"# Nabor agent package\n\nRead package.json for the list of independent item manifests. Each item.json is authoritative and uses schemaVersion 1. Asset paths are relative to its item folder. original is the full-resolution image to use; caption-source is evidence containing caption text; reference provides context. caption is the final caption, entered by the user or generated by an agent. notes contains user instructions. Never apply one item's caption or references to another item. If caption is empty, generate it from this item's images and references using the instructions. Preserve existing captions. Do not invent unsupported details; explain missing source material when needed. All assets are copied with original bytes intact. No outside paths or agent provider are required.\n")?;
+        atomic_write(&staging.path().join("README.md"),b"# Nabor agent package\n\nRead package.json for the list of independent item manifests. Each item.json is authoritative and uses schemaVersion 1, 2, or 3. Schema 3 adds documents with id, filename, format, title, notes, role, storage, path, and contentHash; document paths are relative. Original PDF, DOCX, MD and TXT files are included unchanged. Extracted text is a rebuildable cache and is not included in this export. Read originals with appropriate tools; scanned PDFs may need OCR. Schema 2 adds website reference attachments in links: each has id, url, title, and notes. Website contents have not been fetched or included; do not claim to have read the URLs. Asset paths are relative to its item folder. original is the full-resolution image to use; caption-source is evidence containing caption text; reference provides context. caption is the final caption, entered by the user or generated by an agent. notes contains user instructions. Never apply one item's caption or references to another item. If caption is empty, generate it from this item's images and references using the instructions. Preserve existing captions. Do not invent unsupported details; explain missing source material when needed. All image assets are copied with original bytes intact. Website links retain their URLs and user-entered text. No outside paths or agent provider are required.\n")?;
         let destination = parent.join(format!("Nabor-export-{}-{}", now(), &id()[..8]));
         fs::rename(staging.path(), &destination).map_err(err)?;
         Ok(destination)
@@ -873,13 +1097,23 @@ impl Collection {
     }
 }
 
+pub fn cached_thumbnail(root: &Path, asset_id: &str) -> Option<PathBuf> {
+    valid_id(asset_id).ok()?;
+    ["png", "jpg"]
+        .into_iter()
+        .map(|ext| {
+            root.join(".nabor/thumbnails")
+                .join(format!("{asset_id}.{ext}"))
+        })
+        .find(|p| p.is_file() && no_symlink(p).is_ok())
+}
+
 // Called from the desktop's thumbnail worker, never from the UI thread.
 pub fn thumbnail(root: &Path, item: &Item, asset: &Asset) -> Result<Option<PathBuf>> {
     use sha2::{Digest, Sha256};
     valid_id(&item.id)?;
     valid_id(&asset.id)?;
     let cache = root.join(".nabor/thumbnails");
-    let output = cache.join(format!("{}.jpg", asset.id));
     let stamp = cache.join(format!("{}.stamp", asset.id));
     let source = if asset.storage == Storage::Copy {
         safe_relative(&asset.path)?;
@@ -897,14 +1131,14 @@ pub fn thumbnail(root: &Path, item: &Item, asset: &Asset) -> Result<Option<PathB
         PathBuf::from(&asset.path)
     };
     if !source.is_file() {
-        return Ok(output.exists().then_some(output));
+        return Ok(cached_thumbnail(root, &asset.id));
     }
     let meta = fs::metadata(&source).map_err(err)?;
     let fingerprint = format!(
         "{:x}",
         Sha256::digest(
             format!(
-                "{}:{}:{:?}",
+                "alpha-v2:{}:{}:{:?}",
                 source.display(),
                 meta.len(),
                 meta.modified().ok()
@@ -912,8 +1146,10 @@ pub fn thumbnail(root: &Path, item: &Item, asset: &Asset) -> Result<Option<PathB
             .as_bytes()
         )
     );
-    if output.exists() && fs::read_to_string(&stamp).unwrap_or_default() == fingerprint {
-        return Ok(Some(output));
+    if fs::read_to_string(&stamp).unwrap_or_default() == fingerprint {
+        if let Some(output) = cached_thumbnail(root, &asset.id) {
+            return Ok(Some(output));
+        }
     }
     let mut reader = image::ImageReader::open(&source)
         .map_err(err)?
@@ -922,13 +1158,34 @@ pub fn thumbnail(root: &Path, item: &Item, asset: &Asset) -> Result<Option<PathB
     let mut limits = image::Limits::default();
     limits.max_alloc = Some(256 * 1024 * 1024);
     reader.limits(limits);
-    let image = reader.decode().map_err(err)?.thumbnail(480, 480).to_rgb8();
+    let decoded = reader.decode().map_err(err)?;
+    let image = decoded
+        .thumbnail(decoded.width().min(480), decoded.height().min(480))
+        .to_rgba8();
+    let transparent = image.pixels().any(|p| p.0[3] < 255);
+    let output = cache.join(format!(
+        "{}.{}",
+        asset.id,
+        if transparent { "png" } else { "jpg" }
+    ));
     let mut data = std::io::Cursor::new(vec![]);
-    image
-        .write_to(&mut data, image::ImageFormat::Jpeg)
-        .map_err(err)?;
+    if transparent {
+        image
+            .write_to(&mut data, image::ImageFormat::Png)
+            .map_err(err)?;
+    } else {
+        image::DynamicImage::ImageRgba8(image)
+            .to_rgb8()
+            .write_to(&mut data, image::ImageFormat::Jpeg)
+            .map_err(err)?;
+    }
     atomic_write(&output, &data.into_inner())?;
     atomic_write(&stamp, fingerprint.as_bytes())?;
+    let _ = fs::remove_file(cache.join(format!(
+        "{}.{}",
+        asset.id,
+        if transparent { "jpg" } else { "png" }
+    )));
     Ok(Some(output))
 }
 

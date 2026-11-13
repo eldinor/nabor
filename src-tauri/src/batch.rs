@@ -64,6 +64,14 @@ pub fn draft_view(c: &Collection, d: CaptionDraftRecord) -> Value {
 fn perform(app: tauri::AppHandle, payload: BatchRequest) -> Result<Value, String> {
     let rt = app.state::<Runtime>();
     let mut identity = None;
+    let only_attachments = if matches!(
+        &payload,
+        BatchRequest::Preview { .. } | BatchRequest::Start { .. }
+    ) {
+        agent::send_only_attachments(&app)?
+    } else {
+        false
+    };
     if matches!(
         &payload,
         BatchRequest::Start { .. } | BatchRequest::Resume | BatchRequest::RetryFailed
@@ -95,7 +103,9 @@ fn perform(app: tauri::AppHandle, payload: BatchRequest) -> Result<Value, String
         BatchRequest::Status => Ok(
             json!({"queue":c.read_caption_queue()?.map(QueueView::from),"draftCount":c.list_caption_drafts(0,0)?.total,"active":rt.active.load(Ordering::SeqCst)}),
         ),
-        BatchRequest::Preview { ids } => Ok(json!(c.queue_preview(ids)?)),
+        BatchRequest::Preview { ids } => {
+            Ok(json!(c.queue_preview_for_agent(ids, only_attachments)?))
+        }
         BatchRequest::Drafts { offset, limit } => Ok(json!(c.list_caption_drafts(offset, limit)?)),
         BatchRequest::GetDraft { item_id } => Ok(draft_view(
             c,
@@ -143,7 +153,7 @@ fn perform(app: tauri::AppHandle, payload: BatchRequest) -> Result<Value, String
                 created_at: timestamp(),
                 state: QueueState::Running,
                 last_error: None,
-                entries: c.caption_entries(ids)?,
+                entries: c.caption_entries_for_agent(ids, only_attachments)?,
             };
             if q.counts().pending == 0 {
                 return Err("No eligible items. Existing captions and drafts are skipped.".into());

@@ -404,6 +404,13 @@ impl Collection {
         Ok(ids)
     }
     pub fn caption_entries(&self, selected: Option<Vec<String>>) -> Result<Vec<QueueEntry>> {
+        self.caption_entries_for_agent(selected, false)
+    }
+    pub fn caption_entries_for_agent(
+        &self,
+        selected: Option<Vec<String>>,
+        only_attachments: bool,
+    ) -> Result<Vec<QueueEntry>> {
         let ids = match selected {
             Some(ids) => ids,
             None => self.collection_item_ids()?,
@@ -428,15 +435,9 @@ impl Collection {
                         e.state = WorkState::SkippedCaption
                     } else if self.draft_path(&item_id)?.exists() {
                         e.state = WorkState::SkippedDraft
-                    } else if item.assets.is_empty()
-                        || item.assets.len() > 20
-                        || item
-                            .assets
-                            .iter()
-                            .any(|a| self.resolve(&item, a).map(|p| !p.is_file()).unwrap_or(true))
-                    {
+                    } else if let Err(error) = self.agent_assets(&item, only_attachments, true) {
                         e.state = WorkState::Failed;
-                        e.error = Some("Attach 1–20 available images before generating".into())
+                        e.error = Some(error)
                     }
                 }
                 Err(error) => {
@@ -449,6 +450,13 @@ impl Collection {
         Ok(entries)
     }
     pub fn queue_preview(&self, selected: Option<Vec<String>>) -> Result<QueuePreview> {
+        self.queue_preview_for_agent(selected, false)
+    }
+    pub fn queue_preview_for_agent(
+        &self,
+        selected: Option<Vec<String>>,
+        only_attachments: bool,
+    ) -> Result<QueuePreview> {
         let scope = if selected.is_some() {
             "selected"
         } else {
@@ -464,7 +472,7 @@ impl Collection {
             created_at: now(),
             state: QueueState::Paused,
             last_error: None,
-            entries: self.caption_entries(selected)?,
+            entries: self.caption_entries_for_agent(selected, only_attachments)?,
         };
         Ok(QueuePreview {
             scope: q.scope.clone(),

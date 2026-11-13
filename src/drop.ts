@@ -18,8 +18,8 @@ export function readImageDrop(data: DataTransfer): ImageDrop {
   if (!candidates.length) { const plain = webUrl(data.getData('text/plain').trim()); if (plain) candidates.push(plain); }
   const urls = [...new Set(candidates)];
   const files = Array.from(data.files);
-  if (files.some(f => f.size > 50 * 1024 * 1024)) throw new Error('Image exceeds the 50 MB import limit.');
-  if (Math.max(files.length, urls.length, localPaths.length) > 20) throw new Error('Drop up to 20 images at a time.');
+  if (files.some(f => f.size > 50 * 1024 * 1024)) throw new Error('File exceeds the 50 MB import limit.');
+  if (Math.max(files.length, urls.length, localPaths.length) > 20) throw new Error('Drop up to 20 files at a time.');
   if (!files.length && !urls.length && !localPaths.length) throw new Error('Drop an image or a direct image URL. Images available only inside Chrome must be saved or copied first.');
   return { files, urls, sourceUrl: imageUrl ?? (downloadUrl ? webUrl(downloadUrl) : null) ?? urls[0] ?? null, localPaths };
 }
